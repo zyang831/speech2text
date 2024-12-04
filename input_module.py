@@ -6,6 +6,8 @@ from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC
 from collections import deque
 import threading
 import queue
+import librosa
+import noisereduce as nr
 
 class RealTimeASR:
     def __init__(self, 
@@ -25,6 +27,24 @@ class RealTimeASR:
         self.audio_queue = queue.Queue()
         self.is_running = True
         self.callback = callback  # Store callback function
+        self.noise_sample = None
+        self.calibration_samples = []
+        self.is_calibrating = True
+        self.calibration_duration = 1  # 1 second of noise sampling
+
+    def preprocess_audio(self, audio_data):
+        # Normalize audio
+        audio_data = librosa.util.normalize(audio_data)
+        
+        # Apply noise reduction if we have a noise profile
+        if self.noise_sample is not None:
+            audio_data = nr.reduce_noise(
+                y=audio_data,
+                sr=self.sample_rate,
+                prop_decrease=0.8
+            )
+        
+        return audio_data
 
     def process_audio_stream(self, indata, frames, time, status):
         if status:
@@ -32,8 +52,19 @@ class RealTimeASR:
             return
 
         audio_chunk = indata.flatten()
-        audio_chunk = np.clip(audio_chunk, -1.0, 1.0)  # Normalize audio
-        self.audio_queue.put(audio_chunk)
+
+        # During calibration, collect noise samples
+        if self.is_calibrating:
+            self.calibration_samples.extend(audio_chunk)
+            if len(self.calibration_samples) >= self.sample_rate * self.calibration_duration:
+                print("Calibration complete. Beginning transcription...")
+                self.noise_sample = np.array(self.calibration_samples)
+                self.is_calibrating = False
+            return
+
+        # Preprocess audio before adding to queue
+        processed_audio = self.preprocess_audio(audio_chunk)
+        self.audio_queue.put(processed_audio)
 
     def process_queue(self):
         while self.is_running:
@@ -67,6 +98,7 @@ class RealTimeASR:
                 print(f"Error processing audio: {e}")
         
     def start_streaming(self):
+        print("Calibrating noise profile... Please remain quiet.")
         process_thread = threading.Thread(target=self.process_queue)
         process_thread.start()
         
