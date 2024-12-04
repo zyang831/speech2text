@@ -8,6 +8,8 @@ import threading
 import queue
 import librosa
 import noisereduce as nr
+import re
+from spellchecker import SpellChecker
 
 class RealTimeASR:
     def __init__(self, 
@@ -31,6 +33,8 @@ class RealTimeASR:
         self.calibration_samples = []
         self.is_calibrating = True
         self.calibration_duration = 1  # 1 second of noise sampling
+        self.spell = SpellChecker()
+        self.confidence_threshold = 0.5  # Set confidence threshold
 
     def preprocess_audio(self, audio_data):
         # Normalize audio
@@ -66,6 +70,12 @@ class RealTimeASR:
         processed_audio = self.preprocess_audio(audio_chunk)
         self.audio_queue.put(processed_audio)
 
+    def normalize_text(self, text):
+        # Normalize text by lowercasing and handling abbreviations
+        text = text.lower()
+        text = re.sub(r'\b(\w+)\.(\w+)\b', r'\1 \2', text)
+        return text
+
     def process_queue(self):
         while self.is_running:
             try:
@@ -86,12 +96,25 @@ class RealTimeASR:
                         logits = self.model(inputs.input_values).logits
                     predicted_ids = torch.argmax(logits, dim=-1)
                     transcription = self.processor.decode(predicted_ids[0])
-                    
-                    # Call the callback function if it exists
-                    if self.callback:
-                        self.callback(transcription)
+
+                    # Calculate confidence
+                    probs = torch.softmax(logits, dim=-1)
+                    confidence = torch.max(probs).item()
+
+                    if confidence >= self.confidence_threshold:
+                        # Apply text normalization
+                        transcription = self.normalize_text(transcription)
+                        # Apply spell correction
+                        corrected = ' '.join([self.spell.correction(word) for word in transcription.split()])
+                        transcription = corrected
+
+                        # Call the callback function if it exists
+                        if self.callback:
+                            self.callback(transcription)
+                        else:
+                            print(f"Transcription: {transcription}")
                     else:
-                        print(f"Transcription: {transcription}")
+                        print("Low confidence transcription ignored.")
             except queue.Empty:
                 continue
             except Exception as e:
